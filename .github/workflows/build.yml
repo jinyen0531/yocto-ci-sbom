@@ -1,0 +1,60 @@
+name: Yocto Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with kas
+        run: |
+          docker run --rm \
+            --user $(id -u):$(id -g) \
+            -v "${{ github.workspace }}:/builder" \
+            -v "$HOME/yocto-kas/sstate:/sstate-cache" \
+            -v "$HOME/yocto-kas/downloads:/downloads" \
+            -e BB_ENV_PASSTHROUGH_ADDITIONS="SSTATE_DIR DL_DIR" \
+            -e SSTATE_DIR=/sstate-cache \
+            -e DL_DIR=/downloads \
+            ghcr.io/siemens/kas/kas \
+            build /builder/kas/qemu.yml
+
+      - name: Upload image
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemux86-64-image
+          path: build/tmp/deploy/images/qemux86-64/
+          retention-days: 7
+
+      - name: Notify Slack (success)
+        if: success()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "✅ *Yocto build succeeded*\nBranch: `${{ github.ref_name }}` | Commit: `${{ github.sha }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+            }
+
+      - name: Notify Slack (failure)
+        if: failure()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "❌ *Yocto build failed*\nBranch: `${{ github.ref_name }}` | Commit: `${{ github.sha }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View run>"
+            }
