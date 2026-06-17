@@ -4,6 +4,22 @@ header:
 distro: poky
 target: core-image-minimal
 
+# 注意：BB_GIT_SHALLOW / BB_GIT_SHALLOW_DEPTH 不能全域啟用。
+# 原因：部分 recipe 會 pin 到特定 commit SHA，若該 SHA 不在 shallow depth 範圍內，
+# bitbake fetch 會直接報錯找不到該 commit，導致 build 失敗。
+#
+# 真實錯誤範例 (linux-yocto-6.6.127)：
+#   Unable to find revision 70af2998be31b72a111de67966b7816b3d54d472
+#   in branch v6.6/standard/base even from upstream
+#   → FetchError: Unable to fetch URL from any source.
+#
+# 需要加速時，只能針對單一 recipe 用 SRC_URI 的 shallow=1;depth=N 參數個別設定。
+#
+# local_conf_header:
+#   fetch-safety: |
+#     BB_GIT_SHALLOW = "1"
+#     BB_GIT_SHALLOW_DEPTH = "1"
+
 repos:
   poky:
     url: https://git.yoctoproject.org/poky
