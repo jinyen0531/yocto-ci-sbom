@@ -1,0 +1,138 @@
+// 練習版：clone 高通 meta-qcom (branch wrynose) 後，用 kas-container 編譯 OS image。
+// 最終目標是用 kas build 取代原本的 repo sync + bitbake 流程；這是最小可跑的第一步。
+
+// 透過 Slack incoming webhook 發通知（沿用 .github/workflows/build.yml 的 webhook 方式）。
+// Webhook URL 由 SLACK_WEBHOOK_URL 這個 string parameter 於觸發 build 時填入，
+// 不寫死在檔案裡（避免 commit 上 GitHub 洩漏）。沒填則自動跳過通知。
+def notifySlack(String emoji, String status) {
+    if (!params.SLACK_WEBHOOK_URL?.trim()) {
+        echo 'SLACK_WEBHOOK_URL 未設定，跳過 Slack 通知。'
+        return
+    }
+    // 值都用 env 傳入 shell，並用 python3 產生 JSON，避免特殊字元破壞 payload。
+    withEnv([
+        "SLACK_WEBHOOK_URL=${params.SLACK_WEBHOOK_URL}",
+        "SLACK_TEXT=${emoji} Yocto build ${status}\n" +
+            "Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}\n" +
+            "Machine: ${params.MACHINE} | Branch: ${params.QCOM_BRANCH}\n" +
+            "${env.BUILD_URL}",
+    ]) {
+        sh '''
+            set -eu
+            PAYLOAD=$(python3 -c 'import json,os; print(json.dumps({"text": os.environ["SLACK_TEXT"]}))')
+            curl -fsSL -X POST -H 'Content-type: application/json' \
+                --data "${PAYLOAD}" "${SLACK_WEBHOOK_URL}"
+        '''
+    }
+}
+
+pipeline {
+    // 用固定、無空白的 workspace：kas-container 不支援路徑含空白，
+    // 且 Jenkins job 名稱可能有空白（workspace 預設帶 job 名）。
+    // 固定路徑同時讓 build/downloads、build/sstate-cache 跨 build 保留。
+    agent {
+        node {
+            label 'built-in'
+            customWorkspace "${env.CUSTOM_WORKSPACE}"
+        }
+    }
+    
+    parameters {
+        choice(
+            name: 'MACHINE',
+            choices: [
+                'iq-9075-evk',
+            ],
+            description: '目標機種，對應 meta-qcom/ci/<MACHINE>.yml'
+        )
+        string(
+            name: 'QCOM_BRANCH',
+            defaultValue: 'wrynose',
+            description: 'meta-qcom 的分支'
+        )
+        string(
+            name: 'SLACK_WEBHOOK_URL',
+            defaultValue: '',
+            description: 'Slack incoming webhook URL；觸發 build 時填入。留空則跳過通知（勿寫死並 commit）'
+        )
+    }
+
+    environment {
+        // 讓自動下載到 workspace 的 kas-container 找得到
+        PATH = "${WORKSPACE}/bin:${env.PATH}"
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactDaysToKeepStr: '7'))
+        timeout(time: 6, unit: 'HOURS')
+    }
+
+    stages {
+        stage('Prepare kas-container') {
+            steps {
+                sh '''
+                    set -eux
+                    uname -m                       # 應顯示 x86_64
+                    docker --version               # kas-container 需要 docker
+
+                    mkdir -p "${WORKSPACE}/bin"
+                    if ! command -v kas-container >/dev/null 2>&1; then
+                        curl -fsSL -o "${WORKSPACE}/bin/kas-container" \
+                            https://raw.githubusercontent.com/siemens/kas/master/kas-container
+                        chmod +x "${WORKSPACE}/bin/kas-container"
+                    fi
+                    kas-container --version
+                '''
+            }
+        }
+
+        stage('Clone meta-qcom') {
+            steps {
+                sh '''
+                    set -eux
+                    if [ -d meta-qcom/.git ]; then
+                        git -C meta-qcom fetch --depth 1 origin "${QCOM_BRANCH}"
+                        git -C meta-qcom checkout -B "${QCOM_BRANCH}" "origin/${QCOM_BRANCH}"
+                    else
+                        git clone --depth 1 https://github.com/qualcomm-linux/meta-qcom.git -b "${QCOM_BRANCH}"
+                    fi
+                    test -f "meta-qcom/ci/${MACHINE}.yml"   # 提早驗證設定檔存在
+                '''
+            }
+        }
+
+        stage('Build image') {
+            steps {
+                sh '''
+                    set -eux
+                    kas-container build "meta-qcom/ci/${MACHINE}.yml"
+                '''
+            }
+        }
+
+        stage('List images') {
+            steps {
+                sh '''
+                    set -eux
+                    ls -R build/tmp/deploy/images/ || true
+                    ls -d "build/tmp/deploy/images/${MACHINE}"   # 目標機種目錄存在才算成功
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Build finished - Status: ${currentBuild.currentResult}"
+        }
+        success {
+            echo "✅ OS image build 完成，產物在 build/tmp/deploy/images/${params.MACHINE}/"
+            notifySlack('✅', 'succeeded')
+        }
+        failure {
+            echo "❌ Build 失敗，請查看 console log。"
+            notifySlack('❌', 'failed')
+        }
+    }
+}
