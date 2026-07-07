@@ -51,10 +51,16 @@ pipeline {
             description: 'meta-qcom 的分支'
         )
         string(
+            name: 'TARGET',
+            defaultValue: 'qcom-multimedia-image',
+            description: 'target file for yocto build'
+        )
+        string(
             name: 'SLACK_WEBHOOK_URL',
             defaultValue: '',
             description: 'Slack incoming webhook URL；觸發 build 時填入。留空則跳過通知（勿寫死並 commit）'
         )
+        booleanParam(name: 'CLEAN_CACHE', defaultValue: false, description: 'Remove build folder of Yocto, still keep downloads and sstate-cache folder.')
     }
 
     environment {
@@ -102,11 +108,23 @@ pipeline {
             }
         }
 
+        stage('clean cache') {
+            when {
+                expression { params.CLEAN_CACHE }
+            }
+            steps {
+                sh '''
+                    set -eux
+                    rm -rf build/tmp
+                '''
+            }
+        }
+
         stage('Build image') {
             steps {
                 sh '''
                     set -eux
-                    kas-container build "meta-qcom/ci/${MACHINE}.yml"
+                    kas-container --runtime-args "--security-opt seccomp=unconfined" build "meta-qcom/ci/${MACHINE}.yml:meta-qcom/ci/qcom-distro.yml" --target ${TARGET}
                 '''
             }
         }
